@@ -1,0 +1,8 @@
+flask
+flask-cors
+watchdog
+sentence-transformers
+pymupdf
+python-docx
+openpyxl
+numpy

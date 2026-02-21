@@ -1,0 +1,24 @@
+{
+  "watch_folders": [
+    "C:\\Users\\YourName\\Documents",
+    "C:\\Users\\YourName\\Desktop"
+  ],
+  "excluded_extensions": [
+    ".tmp", ".log", ".sys", ".dll", ".exe",
+    ".ini", ".dat", ".db", ".lnk", ".url", ".pst", ".ost"
+  ],
+  "extraction": {
+    "enabled": true,
+    "extract_types": [".pdf", ".docx", ".doc", ".xlsx", ".xls", ".txt", ".csv"],
+    "max_file_size_mb": 10,
+    "content_length_cap": 2000,
+    "throttle_ms": 100
+  },
+  "semantic_search": {
+    "enabled": true,
+    "keyword_fallback": true,
+    "similarity_threshold": 0.40,
+    "model_name": "neuml/pubmedbert-base-embeddings"
+  }
+}
+```

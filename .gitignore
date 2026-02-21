@@ -1,0 +1,21 @@
+# Personal data - never commit these
+config.json
+file_index.db
+
+# PyInstaller output
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# Sentence Transformers model cache
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db

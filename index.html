@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>DeepFind</title>
+<style>
+  *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
+  :root {
+    --bg:#0f1117; --surface:#1a1d27; --card:#21253a; --border:#2e3348;
+    --accent:#5c6ef8; --accent2:#7c8fff; --text:#e2e4f0; --muted:#7a7f99;
+    --green:#4caf82; --red:#e05c6a; --yellow:#f4a94e; --radius:10px;
+  }
+  body { background:var(--bg); color:var(--text); font-family:'Segoe UI',system-ui,sans-serif; font-size:14px; min-height:100vh; }
+
+  /* ── Layout ── */
+  .shell   { display:flex; height:100vh; overflow:hidden; }
+  .sidebar { width:225px; min-width:225px; background:var(--surface); border-right:1px solid var(--border); display:flex; flex-direction:column; padding:16px 12px; gap:4px; }
+  .main    { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+  .topbar  { padding:18px 24px 0; border-bottom:1px solid var(--border); }
+  .content { flex:1; overflow-y:auto; padding:16px 24px 24px; }
+
+  /* ── Logo ── */
+  .logo      { display:flex; align-items:center; gap:10px; padding:4px 8px 16px; border-bottom:1px solid var(--border); margin-bottom:8px; }
+  .logo-icon { width:32px; height:32px; background:var(--accent); border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:18px; }
+  .logo-text { font-weight:700; font-size:15px; }
+
+  /* ── Nav ── */
+  .nav-item        { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:7px; cursor:pointer; color:var(--muted); font-size:13px; font-weight:500; transition:all .15s; }
+  .nav-item:hover  { background:var(--card); color:var(--text); }
+  .nav-item.active { background:rgba(92,110,248,.18); color:var(--accent2); }
+  .nav-item .ico   { font-size:16px; width:20px; text-align:center; }
+  .nav-label       { font-size:11px; text-transform:uppercase; letter-spacing:.8px; color:var(--muted); padding:10px 10px 4px; }
+
+  /* ── Status bar ── */
+  .status-bar     { margin-top:auto; background:var(--card); border:1px solid var(--border); border-radius:8px; padding:10px 12px; font-size:12px; }
+  .status-row     { display:flex; justify-content:space-between; align-items:center; }
+  .status-divider { border-top:1px solid var(--border); margin-top:8px; padding-top:8px; }
+  .pill           { padding:2px 8px; border-radius:99px; font-size:11px; font-weight:600; }
+  .pill.idle  { background:rgba(76,175,130,.15);  color:var(--green); }
+  .pill.busy  { background:rgba(244,169,78,.15);  color:var(--yellow); }
+  .pill.off   { background:rgba(122,127,153,.15); color:var(--muted); }
+  .pill.error { background:rgba(224,92,106,.15);  color:var(--red); }
+  .idx-count   { color:var(--muted); margin-top:4px; font-size:11px; }
+  .idx-current { color:var(--muted); font-size:10px; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  /* ── Search bar ── */
+  .search-wrap { position:relative; margin-bottom:14px; }
+  .search-icon { position:absolute; left:14px; top:50%; transform:translateY(-50%); font-size:18px; color:var(--muted); pointer-events:none; }
+  #searchInput { width:100%; padding:12px 16px 12px 44px; border-radius:10px; border:1.5px solid var(--border); background:var(--card); color:var(--text); font-size:15px; outline:none; transition:border .15s; }
+  #searchInput:focus { border-color:var(--accent); }
+  #searchInput::placeholder { color:var(--muted); }
+
+  /* ── Filter chips ── */
+  .filter-row  { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:0; }
+  .chip        { padding:5px 12px; border-radius:99px; border:1px solid var(--border); background:var(--card); color:var(--muted); font-size:12px; cursor:pointer; transition:all .15s; user-select:none; }
+  .chip:hover  { border-color:var(--accent); color:var(--text); }
+  .chip.active { background:rgba(92,110,248,.2); border-color:var(--accent); color:var(--accent2); }
+  .filter-sep  { width:1px; height:20px; background:var(--border); margin:0 4px; }
+  select.folder-filter { padding:5px 10px; border-radius:99px; border:1px solid var(--border); background:var(--card); color:var(--muted); font-size:12px; cursor:pointer; outline:none; }
+  select.folder-filter:focus { border-color:var(--accent); }
+
+  /* ── Result tabs ── */
+  .result-tabs  { display:flex; border-bottom:2px solid var(--border); margin-top:16px; }
+  .result-tab   { display:flex; align-items:center; gap:8px; padding:10px 20px; font-size:13px; font-weight:600; color:var(--muted); cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-2px; transition:all .15s; user-select:none; white-space:nowrap; }
+  .result-tab:hover   { color:var(--text); }
+  .result-tab.active  { color:var(--accent2); border-bottom-color:var(--accent); }
+  .tab-dot      { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
+  .tab-count    { font-size:11px; padding:1px 7px; border-radius:99px; background:var(--surface); border:1px solid var(--border); font-weight:700; min-width:22px; text-align:center; }
+  .result-tab.active .tab-count { background:rgba(92,110,248,.2); border-color:var(--accent); color:var(--accent2); }
+  .tab-disabled { opacity:.4; pointer-events:none; }
+
+  /* ── Results ── */
+  .result-meta  { font-size:12px; color:var(--muted); margin:12px 0 10px; }
+  .result-meta strong { color:var(--accent2); }
+  .result-list  { display:flex; flex-direction:column; gap:6px; }
+  .result-card  { display:flex; align-items:center; gap:14px; background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; cursor:pointer; transition:all .15s; }
+  .result-card:hover { border-color:var(--accent); background:#252940; }
+  .file-icon    { font-size:26px; min-width:36px; text-align:center; }
+  .file-info    { flex:1; min-width:0; }
+  .file-name    { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .file-path    { font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
+  .file-meta    { display:flex; gap:8px; margin-top:5px; flex-wrap:wrap; }
+  .badge        { font-size:10px; padding:2px 7px; border-radius:4px; background:var(--surface); color:var(--muted); border:1px solid var(--border); font-weight:600; }
+  .badge.ext    { color:#a78bfa; border-color:#4a3b80; background:rgba(91,60,160,.15); }
+  .badge.score  { color:var(--green); border-color:rgba(76,175,130,.3); background:rgba(76,175,130,.1); }
+  .file-actions { display:flex; gap:6px; opacity:0; transition:opacity .15s; }
+  .result-card:hover .file-actions { opacity:1; }
+  .btn-sm       { padding:5px 10px; border-radius:6px; border:1px solid var(--border); background:var(--surface); color:var(--text); font-size:11px; cursor:pointer; transition:all .15s; white-space:nowrap; }
+  .btn-sm:hover { background:var(--accent); border-color:var(--accent); color:#fff; }
+
+  /* ── Empty ── */
+  .empty      { text-align:center; padding:50px 20px; color:var(--muted); }
+  .empty .big { font-size:48px; margin-bottom:12px; }
+  .empty p    { font-size:14px; line-height:1.8; }
+
+  /* ── Settings ── */
+  .section-title    { font-size:16px; font-weight:700; margin-bottom:16px; }
+  .setting-group    { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:18px; margin-bottom:14px; }
+  .setting-group h4 { font-size:13px; font-weight:700; margin-bottom:4px; }
+  .setting-desc     { font-size:11px; color:var(--muted); margin-bottom:14px; line-height:1.5; }
+  .setting-row      { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  .setting-row:last-child { margin-bottom:0; }
+  .setting-label    { font-size:13px; font-weight:500; }
+  .setting-sublabel { font-size:11px; color:var(--muted); margin-top:2px; }
+  .toggle           { position:relative; width:40px; height:22px; flex-shrink:0; }
+  .toggle input     { opacity:0; width:0; height:0; }
+  .toggle-track     { position:absolute; inset:0; background:var(--border); border-radius:99px; cursor:pointer; transition:background .2s; }
+  .toggle input:checked + .toggle-track { background:var(--accent); }
+  .toggle-track::after { content:''; position:absolute; width:16px; height:16px; background:#fff; border-radius:50%; top:3px; left:3px; transition:transform .2s; }
+  .toggle input:checked + .toggle-track::after { transform:translateX(18px); }
+  .slider-row       { margin-bottom:16px; }
+  .slider-row:last-child { margin-bottom:0; }
+  .slider-header    { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+  .slider-label     { font-size:12px; font-weight:500; }
+  .slider-value     { font-size:12px; font-weight:700; color:var(--accent2); background:rgba(92,110,248,.15); padding:2px 8px; border-radius:5px; min-width:70px; text-align:center; }
+  input[type=range] { width:100%; accent-color:var(--accent); cursor:pointer; }
+  .range-labels     { display:flex; justify-content:space-between; font-size:10px; color:var(--muted); margin-top:3px; }
+  .type-grid        { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:8px; }
+  .type-chip        { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:var(--surface); cursor:pointer; user-select:none; font-size:12px; font-weight:500; transition:all .15s; }
+  .type-chip:hover  { border-color:var(--accent); }
+  .type-chip.on     { border-color:var(--accent); background:rgba(92,110,248,.15); color:var(--accent2); }
+  .type-chip input  { display:none; }
+  .folder-list      { display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
+  .folder-item      { display:flex; align-items:center; justify-content:space-between; background:var(--surface); border:1px solid var(--border); border-radius:7px; padding:8px 12px; font-size:12px; }
+  .folder-item .fp  { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
+  .btn-icon         { background:none; border:none; color:var(--muted); cursor:pointer; font-size:16px; padding:2px 6px; border-radius:4px; }
+  .btn-icon:hover   { color:var(--red); background:rgba(224,92,106,.1); }
+  .add-folder-row   { display:flex; gap:8px; }
+  input.txt         { flex:1; padding:8px 12px; border-radius:7px; border:1px solid var(--border); background:var(--surface); color:var(--text); font-size:13px; outline:none; }
+  input.txt:focus   { border-color:var(--accent); }
+  .btn              { padding:8px 16px; border-radius:7px; border:none; cursor:pointer; font-size:13px; font-weight:600; transition:all .15s; }
+  .btn.primary      { background:var(--accent); color:#fff; }
+  .btn.primary:hover{ background:var(--accent2); }
+  .btn.ghost        { background:var(--surface); border:1px solid var(--border); color:var(--text); }
+  .btn.ghost:hover  { border-color:var(--accent); }
+  .btn.danger       { background:rgba(224,92,106,.15); border:1px solid var(--red); color:var(--red); }
+  .btn.danger:hover { background:var(--red); color:#fff; }
+  .actions-row      { display:flex; gap:8px; flex-wrap:wrap; }
+  .model-badge      { display:inline-flex; align-items:center; gap:6px; padding:4px 12px; border-radius:99px; font-size:11px; font-weight:600; }
+  .model-badge.loaded  { background:rgba(76,175,130,.15);  color:var(--green); border:1px solid rgba(76,175,130,.3); }
+  .model-badge.loading { background:rgba(244,169,78,.15);  color:var(--yellow); border:1px solid rgba(244,169,78,.3); }
+  .model-badge.error   { background:rgba(224,92,106,.15);  color:var(--red);    border:1px solid rgba(224,92,106,.3); }
+
+  /* ── Toast ── */
+  .toast       { position:fixed; bottom:28px; right:28px; display:flex; align-items:center; gap:10px; background:#1e2235; color:#fff; padding:13px 18px; border-radius:10px; font-size:13px; opacity:0; pointer-events:none; transition:opacity .3s,transform .3s; transform:translateY(10px); z-index:999; border:1px solid var(--border); box-shadow:0 8px 24px rgba(0,0,0,.4); min-width:220px; }
+  .toast.show  { opacity:1; transform:translateY(0); }
+  .toast-icon  { font-size:20px; }
+  .toast-body  { display:flex; flex-direction:column; gap:2px; }
+  .toast-title { font-weight:700; font-size:13px; }
+  .toast-sub   { font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:240px; }
+
+  /* ── Misc ── */
+  @keyframes cardPulse { 0%{box-shadow:0 0 0 0 rgba(92,110,248,.5)} 70%{box-shadow:0 0 0 8px rgba(92,110,248,0)} 100%{box-shadow:none} }
+  .card-pulse  { animation:cardPulse .6s ease-out; border-color:var(--accent) !important; }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  .spinner { display:inline-block; width:12px; height:12px; border:2px solid var(--border); border-top-color:var(--yellow); border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-left:6px; }
+  ::-webkit-scrollbar { width:6px; } ::-webkit-scrollbar-track { background:transparent; } ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- ── Sidebar ── -->
+  <div class="sidebar">
+    <div class="logo">
+      <div class="logo-icon">🔍</div>
+      <div class="logo-text">DeepFind</div>
+    </div>
+
+    <div class="nav-item active" id="navSearch"   onclick="showPanel('search')">  <span class="ico">🔎</span> Search   </div>
+    <div class="nav-item"        id="navSettings" onclick="showPanel('settings')"> <span class="ico">⚙️</span> Settings </div>
+
+    <div class="nav-label">Folders</div>
+    <div id="folderNav" style="display:flex;flex-direction:column;gap:2px;overflow-y:auto;max-height:200px;"></div>
+
+    <div class="status-bar">
+      <div class="status-row">
+        <span style="font-size:12px;font-weight:600;">Index</span>
+        <span class="pill idle" id="statusPill">Idle</span>
+      </div>
+      <div class="idx-count"   id="idxCount">— files indexed</div>
+      <div class="idx-current" id="idxCurrent"></div>
+      <div class="status-divider">
+        <div class="status-row">
+          <span style="font-size:11px;color:var(--muted);">Auto-watch</span>
+          <span class="pill off" id="watchPill">Off</span>
+        </div>
+      </div>
+      <div class="status-divider">
+        <div class="status-row">
+          <span style="font-size:11px;color:var(--muted);">AI Model</span>
+          <span class="pill off" id="modelPill">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Main ── -->
+  <div class="main">
+
+    <!-- Topbar: Search -->
+    <div class="topbar" id="topbarSearch">
+      <div class="search-wrap">
+        <span class="search-icon">🔍</span>
+        <input id="searchInput" type="text" placeholder="Search files… e.g.  PSUR   or   safety agreement" autocomplete="off"/>
+      </div>
+      <div class="filter-row">
+        <span class="chip active" data-type="">All</span>
+        <span class="chip" data-type="pdf">PDF</span>
+        <span class="chip" data-type="docx,doc">Word</span>
+        <span class="chip" data-type="xlsx,xls">Excel</span>
+        <span class="chip" data-type="pptx,ppt">PPT</span>
+        <span class="chip" data-type="txt,csv">Text/CSV</span>
+        <span class="chip" data-type="jpg,jpeg,png,gif">Images</span>
+        <div class="filter-sep"></div>
+        <select class="folder-filter" id="folderFilter" onchange="doSearch()">
+          <option value="">All folders</option>
+        </select>
+      </div>
+
+      <!-- Result tabs (inside topbar so they sit on the border line) -->
+      <div class="result-tabs" id="resultTabs" style="display:none;">
+        <div class="result-tab active" id="tabKeyword" onclick="switchTab('keyword')">
+          <div class="tab-dot" style="background:#4caf82;"></div>
+          Keyword &amp; Content
+          <span class="tab-count" id="kwCount">0</span>
+        </div>
+        <div class="result-tab" id="tabSemantic" onclick="switchTab('semantic')">
+          <div class="tab-dot" style="background:#7c8fff;"></div>
+          Semantic AI
+          <span class="tab-count" id="semCount">0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Topbar: Settings -->
+    <div class="topbar" id="topbarSettings" style="display:none; padding-bottom:18px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <h2 style="font-size:18px;font-weight:700;">⚙️ Settings</h2>
+        <button class="btn primary" onclick="saveSettings()">💾 Save All Settings</button>
+      </div>
+    </div>
+
+    <!-- Content: Search -->
+    <div class="content" id="panelSearch">
+      <div id="resultMeta" class="result-meta"></div>
+      <div id="resultList" class="result-list"></div>
+      <div id="emptyState" class="empty" style="display:none;">
+        <div class="big">🗂️</div>
+        <p id="emptyMsg">No files found.</p>
+      </div>
+      <div id="welcomeState" class="empty">
+        <div class="big">🔍</div>
+        <p>Start typing to search your files.<br/>
+        <span style="font-size:12px;">Semantic AI understands meaning - try <em> Risk Management Plans</em> even if the file is named <em>RMP_v2_final.pdf</em></span></p>
+      </div>
+    </div>
+
+    <!-- Content: Settings -->
+    <div class="content" id="panelSettings" style="display:none;">
+
+      <div class="setting-group">
+        <h4>📁 Watched Folders</h4>
+        <p class="setting-desc">Files in these folders (and subfolders) will be indexed and searchable.</p>
+        <div class="folder-list" id="folderList"></div>
+        <div class="add-folder-row">
+          <input class="txt" id="newFolderInput" type="text" placeholder="Paste full path e.g. C:\Users\Gaurav\Documents"/>
+          <button class="btn primary" onclick="addFolder()">Add</button>
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <h4>📄 Content Extraction</h4>
+        <p class="setting-desc">Extract text from inside documents during indexing. No impact on search speed.</p>
+        <div class="setting-row">
+          <div><div class="setting-label">Enable content extraction</div><div class="setting-sublabel">Read text inside documents during indexing</div></div>
+          <label class="toggle"><input type="checkbox" id="extractEnabled" checked/><div class="toggle-track"></div></label>
+        </div>
+        <div style="margin-bottom:14px;">
+          <div class="setting-label" style="font-size:12px;font-weight:600;margin-bottom:8px;">File types to extract</div>
+          <div class="type-grid" id="typeGrid"></div>
+        </div>
+        <div class="slider-row">
+          <div class="slider-header"><span class="slider-label">Max file size to process</span><span class="slider-value" id="maxSizeVal">10 MB</span></div>
+          <input type="range" id="maxSize" min="1" max="100" value="10" step="1" oninput="document.getElementById('maxSizeVal').textContent=this.value+' MB'"/>
+          <div class="range-labels"><span>1 MB</span><span>100 MB</span></div>
+        </div>
+        <div class="slider-row">
+          <div class="slider-header"><span class="slider-label">Content length cap</span><span class="slider-value" id="contentCapVal">2000 chars</span></div>
+          <input type="range" id="contentCap" min="500" max="10000" value="2000" step="500" oninput="document.getElementById('contentCapVal').textContent=this.value+' chars'"/>
+          <div class="range-labels"><span>500</span><span>10,000</span></div>
+        </div>
+        <div class="slider-row">
+          <div class="slider-header"><span class="slider-label">Throttle delay between files</span><span class="slider-value" id="throttleVal">100 ms</span></div>
+          <input type="range" id="throttle" min="0" max="1000" value="100" step="50" oninput="document.getElementById('throttleVal').textContent=this.value+' ms'"/>
+          <div class="range-labels"><span>0 ms (fastest)</span><span>1000 ms (slowest)</span></div>
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <h4>🧠 Semantic Search (AI)</h4>
+        <p class="setting-desc">Uses a biomedical embedding model to find files by meaning. Runs fully offline.</p>
+        <div class="setting-row">
+          <div><div class="setting-label">Enable semantic search</div><div class="setting-sublabel">Find files by meaning even with different words</div></div>
+          <label class="toggle"><input type="checkbox" id="semEnabled" checked/><div class="toggle-track"></div></label>
+        </div>
+        <div class="setting-row">
+          <div><div class="setting-label">Keyword fallback</div><div class="setting-sublabel">Fall back to keyword search if AI finds nothing</div></div>
+          <label class="toggle"><input type="checkbox" id="semFallback" checked/><div class="toggle-track"></div></label>
+        </div>
+        <div class="slider-row">
+          <div class="slider-header"><span class="slider-label">Similarity threshold</span><span class="slider-value" id="threshVal">40%</span></div>
+          <input type="range" id="semThresh" min="10" max="70" value="40" step="5" oninput="document.getElementById('threshVal').textContent=this.value+'%'"/>
+          <div class="range-labels"><span>10% (broad)</span><span>70% (strict)</span></div>
+        </div>
+
+        <div style="margin-bottom:14px;">
+          <div class="setting-label" style="font-size:12px;font-weight:600;margin-bottom:8px;">Embedding Model</div>
+          <p class="setting-desc" style="margin-bottom:8px;">
+            <strong>Biomedical</strong> understands PV terminology, MedDRA, drug names. Recommended for pharma use.<br/>
+            <strong>General</strong> is smaller and faster but has no pharma domain knowledge.<br/>
+            ⚠️ Changing model requires a full re-index.
+          </p>
+          <select id="modelSelect" style="width:100%;padding:9px 12px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;outline:none;">
+            <option value="neuml/pubmedbert-base-embeddings">🧬 Biomedical — PubMedBERT (~440 MB) — Recommended for Pharma</option>
+            <option value="all-MiniLM-L6-v2">⚡ General — MiniLM (~90 MB) — Faster, no pharma knowledge</option>
+          </select>
+        </div>
+
+        <div style="margin-top:12px;">
+          <div class="setting-label" style="font-size:12px;margin-bottom:6px;">AI Model Status</div>
+          <div id="modelStatusBadge" class="model-badge loading">⏳ Loading model…</div>
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <h4>🚀 Indexing</h4>
+        <p class="setting-desc">Run a full index. Use Clean Stale to remove deleted files without full reindex.</p>
+        <div class="actions-row" id="indexActions">
+          <button class="btn primary" id="btnStartIndex" onclick="triggerIndex()">▶ Start Indexing</button>
+          <button class="btn danger"  id="btnStopIndex"  onclick="stopIndex()" style="display:none;">⏹ Stop Indexing</button>
+          <button class="btn ghost"   onclick="cleanStale()">🧹 Clean Stale Entries</button>
+          <button class="btn danger"  onclick="clearIndex()">🗑 Clear Index</button>
+        </div>
+      </div>
+
+      <div class="setting-group">
+        <h4>🚫 Excluded Extensions</h4>
+        <p class="setting-desc">Edit <code>config.json</code> to customise these.</p>
+        <div id="excludedList" style="font-size:12px;color:var(--muted);line-height:2;"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div class="toast" id="toast">
+  <div class="toast-icon"  id="toastIcon"></div>
+  <div class="toast-body">
+    <div class="toast-title" id="toastTitle"></div>
+    <div class="toast-sub"   id="toastSub"></div>
+  </div>
+</div>
+
+<script>
+const API       = 'http://localhost:5000/api';
+let searchTimer = null;
+let activeTypes = '';
+let activeTab   = 'keyword';
+let allResults  = [];
+let lastModelState = null;
+let lastCacheState = null;
+
+const FILE_TYPES = [
+  {ext:".pdf",label:"PDF",icon:"📄"},{ext:".docx",label:"Word",icon:"📝"},
+  {ext:".doc",label:"Doc",icon:"📝"},{ext:".xlsx",label:"Excel",icon:"📊"},
+  {ext:".xls",label:"XLS",icon:"📊"},{ext:".txt",label:"Text",icon:"🗒️"},
+  {ext:".csv",label:"CSV",icon:"🗒️"},
+];
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('searchInput').addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(doSearch, 300);
+  });
+  document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+    document.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
+    c.classList.add('active');
+    activeTypes = c.dataset.type;
+    doSearch();
+  }));
+  buildTypeGrid();
+  pollStatus();
+  loadFolderNav();
+  setInterval(pollStatus,    3000);
+  setInterval(loadFolderNav, 10000);
+});
+
+// ── Panel switching ───────────────────────────────────────────────────────────
+function showPanel(p) {
+  const s = p === 'search';
+  document.getElementById('topbarSearch').style.display   = s ? '' : 'none';
+  document.getElementById('topbarSettings').style.display = s ? 'none' : '';
+  document.getElementById('panelSearch').style.display    = s ? '' : 'none';
+  document.getElementById('panelSettings').style.display  = s ? 'none' : '';
+  document.getElementById('navSearch').classList.toggle('active',  s);
+  document.getElementById('navSettings').classList.toggle('active',!s);
+  if (!s) loadSettings();
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  activeTab = tab;
+  document.getElementById('tabKeyword').classList.toggle('active',  tab === 'keyword');
+  document.getElementById('tabSemantic').classList.toggle('active', tab === 'semantic');
+  renderCurrentTab();
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+async function doSearch() {
+  const q      = document.getElementById('searchInput').value.trim();
+  const folder = document.getElementById('folderFilter').value;
+
+  if (!q) {
+    allResults = [];
+    document.getElementById('resultList').innerHTML   = '';
+    document.getElementById('resultMeta').textContent = '';
+    document.getElementById('resultTabs').style.display   = 'none';
+    document.getElementById('emptyState').style.display   = 'none';
+    document.getElementById('welcomeState').style.display = '';
+    return;
+  }
+  document.getElementById('welcomeState').style.display = 'none';
+
+  try {
+    const res  = await fetch(`${API}/search?q=${encodeURIComponent(q)}&types=${encodeURIComponent(activeTypes)}&folder=${encodeURIComponent(folder)}&limit=100`);
+    allResults = await res.json();
+    updateTabs();
+    renderCurrentTab();
+  } catch {
+    showToast('⚠️','Error','Cannot reach backend. Is app.py running?');
+  }
+}
+
+function updateTabs() {
+  const kw  = allResults.filter(r => r.tier <= 3).length;
+  const sem = allResults.filter(r => r.tier === 4).length;
+
+  document.getElementById('kwCount').textContent  = kw;
+  document.getElementById('semCount').textContent = sem;
+  document.getElementById('resultTabs').style.display = allResults.length ? 'flex' : 'none';
+
+  // Disable semantic tab if no semantic results
+  const semTab = document.getElementById('tabSemantic');
+  semTab.classList.toggle('tab-disabled', sem === 0);
+
+  // If currently on semantic tab but no results, switch to keyword
+  if (activeTab === 'semantic' && sem === 0 && kw > 0) {
+    activeTab = 'keyword';
+    document.getElementById('tabKeyword').classList.add('active');
+    document.getElementById('tabSemantic').classList.remove('active');
+  }
+}
+
+function renderCurrentTab() {
+  const q      = document.getElementById('searchInput').value.trim();
+  const subset = activeTab === 'keyword'
+    ? allResults.filter(r => r.tier <= 3)
+    : allResults.filter(r => r.tier === 4);
+
+  const list  = document.getElementById('resultList');
+  const meta  = document.getElementById('resultMeta');
+  const empty = document.getElementById('emptyState');
+
+  // Nothing at all
+  if (!allResults.length) {
+    list.innerHTML = ''; meta.textContent = '';
+    empty.style.display = '';
+    document.getElementById('emptyMsg').innerHTML = 'No files found.<br/>Try different keywords or check your indexed folders.';
+    return;
+  }
+
+  // Tab is empty
+  if (!subset.length) {
+    list.innerHTML = ''; meta.textContent = '';
+    empty.style.display = '';
+    const warmingUp = allResults[0]?.search_mode === 'warming_up';
+    document.getElementById('emptyMsg').innerHTML = activeTab === 'semantic'
+      ? (warmingUp
+          ? '⏳ AI model is still loading.<br/>Results will appear here once ready.'
+          : 'No semantic matches found.<br/>Try lowering the similarity threshold in Settings.')
+      : 'No keyword or content matches.<br/>Try the Semantic AI tab for meaning-based results.';
+    return;
+  }
+
+  empty.style.display = 'none';
+
+  // Meta line
+  let metaHtml = `<strong>${subset.length}</strong> result${subset.length!==1?'s':''} for "<em>${esc(q)}</em>"`;
+  if (activeTab === 'semantic') {
+    const warmingUp = allResults[0]?.search_mode === 'warming_up';
+    if (warmingUp)
+      metaHtml += ` &nbsp;<span style="font-size:11px;padding:2px 8px;border-radius:99px;background:rgba(244,169,78,.12);color:var(--yellow);border:1px solid rgba(244,169,78,.3);">⏳ AI warming up</span>`;
+    else if (allResults[0]?.pharma_expanded)
+      metaHtml += ` &nbsp;<span title="Query expanded with pharma synonyms" style="font-size:11px;padding:2px 8px;border-radius:99px;background:rgba(92,110,248,.15);color:var(--accent2);border:1px solid rgba(92,110,248,.3);">💊 pharma expanded</span>`;
+  }
+  meta.innerHTML = metaHtml;
+
+  // Cards
+  list.innerHTML = subset.map(f => {
+    const tierBadge =
+      f.tier === 1 ? `<span class="badge" style="color:#4caf82;border-color:rgba(76,175,130,.3);background:rgba(76,175,130,.1);">✅ exact match</span>` :
+      f.tier === 2 ? `<span class="badge" style="color:#7c8fff;border-color:rgba(92,110,248,.3);background:rgba(92,110,248,.1);">🔤 filename</span>` :
+      f.tier === 3 ? `<span class="badge" style="color:#f4a94e;border-color:rgba(244,169,78,.3);background:rgba(244,169,78,.08);">📄 content</span>` :
+                     `<span class="badge score">🧠 ${f.score}% match</span>`;
+    return `
+      <div class="result-card" data-path="${esc(f.path)}">
+        <div class="file-icon">${fileIcon(f.extension)}</div>
+        <div class="file-info">
+          <div class="file-name" title="${esc(f.path)}">${highlight(esc(f.name), q)}</div>
+          <div class="file-path" title="${esc(f.path)}">${esc(f.path)}</div>
+          <div class="file-meta">
+            <span class="badge ext">${f.extension||'file'}</span>
+            ${tierBadge}
+            ${f.has_content ? `<span class="badge">📄 indexed</span>` : ''}
+            <span class="badge">🕒 ${f.modified_str}</span>
+            <span class="badge">📦 ${fmtSize(f.size)}</span>
+          </div>
+        </div>
+        <div class="file-actions">
+          <button class="btn-sm btn-open">Open</button>
+          <button class="btn-sm btn-folder">📂 Folder</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  list.querySelectorAll('.result-card').forEach(card => {
+    const path = card.dataset.path;
+    card.addEventListener('click', () => openFile(path, card));
+    card.querySelector('.btn-open').addEventListener('click',   e => { e.stopPropagation(); openFile(path, card); });
+    card.querySelector('.btn-folder').addEventListener('click', e => { e.stopPropagation(); showInFolder(path, card); });
+  });
+}
+
+// ── File operations ───────────────────────────────────────────────────────────
+async function openFile(path, card) {
+  pulseCard(card);
+  try {
+    const d = await (await fetch(`${API}/open`, post(path))).json();
+    d.error ? showToast('⚠️','Could not open',d.error) : showToast('📂','File Opened',path.split(/[\\/]/).pop());
+  } catch { showToast('⚠️','Error','Backend not reachable'); }
+}
+async function showInFolder(path, card) {
+  pulseCard(card);
+  try {
+    const d = await (await fetch(`${API}/open-folder`, post(path))).json();
+    d.error ? showToast('⚠️','Could not open folder',d.error) : showToast('🗂️','Folder Opened',path.split(/[\\/]/).slice(0,-1).join('\\'));
+  } catch { showToast('⚠️','Error','Backend not reachable'); }
+}
+function post(path) { return { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path}) }; }
+
+// ── Status polling ────────────────────────────────────────────────────────────
+async function pollStatus() {
+  try {
+    const d   = await (await fetch(`${API}/status`)).json();
+    const idx = d.indexing;
+    document.getElementById('idxCount').textContent = `${d.indexed_files.toLocaleString()} files · ${d.embedded_files.toLocaleString()} embedded`;
+    if (idx.running) {
+      document.getElementById('statusPill').className = 'pill busy';
+      document.getElementById('statusPill').innerHTML = 'Indexing<span class="spinner"></span>';
+      document.getElementById('idxCurrent').textContent = idx.current.split(/[\\/]/).pop();
+    } else {
+      document.getElementById('statusPill').className   = 'pill idle';
+      document.getElementById('statusPill').textContent = 'Idle';
+      document.getElementById('idxCurrent').textContent = idx.error || '';
+    }
+    const wp = document.getElementById('watchPill');
+    wp.textContent = d.watching?.active ? 'On' : 'Off';
+    wp.className   = d.watching?.active ? 'pill idle' : 'pill off';
+
+    // Show/hide stop button based on indexing state
+    const btnStart = document.getElementById('btnStartIndex');
+    const btnStop  = document.getElementById('btnStopIndex');
+    if (btnStart && btnStop) {
+      const running = idx.running;
+      btnStart.style.display = running ? 'none' : '';
+      btnStop.style.display  = running ? ''     : 'none';
+    }
+
+    const mp  = document.getElementById('modelPill');
+    const msb = document.getElementById('modelStatusBadge');
+    const cache = d.cache || {};
+
+    if (d.model?.loaded && cache.ready) {
+      mp.textContent = 'Ready'; mp.className = 'pill idle';
+      if (msb) { msb.textContent = `✅ Ready — ${(cache.count||0).toLocaleString()} embeddings cached`; msb.className = 'model-badge loaded'; }
+    } else if (d.model?.loading) {
+      mp.textContent = 'Loading'; mp.className = 'pill busy';
+      if (msb) { msb.innerHTML = '⏳ Loading AI model… <span class="spinner"></span>'; msb.className = 'model-badge loading'; }
+    } else if (cache.building) {
+      mp.textContent = 'Caching'; mp.className = 'pill busy';
+      if (msb) { msb.innerHTML = '⏳ Building search cache… <span class="spinner"></span>'; msb.className = 'model-badge loading'; }
+    } else if (d.model?.error) {
+      mp.textContent = 'Error'; mp.className = 'pill error';
+      if (msb) { msb.textContent = '❌ ' + d.model.error; msb.className = 'model-badge error'; }
+    } else {
+      mp.textContent = '—'; mp.className = 'pill off';
+    }
+
+    // Auto re-search when AI becomes ready
+    const newModel = d.model?.loaded ? 'loaded' : d.model?.loading ? 'loading' : 'other';
+    const newCache = cache.ready ? 'ready' : cache.building ? 'building' : 'other';
+    const justReady = (lastModelState === 'loading' && newModel === 'loaded') ||
+                      (lastCacheState === 'building' && newCache === 'ready');
+    if (justReady) {
+      const q = document.getElementById('searchInput').value.trim();
+      if (q) { showToast('🧠','AI Ready','Upgrading to semantic search…'); setTimeout(doSearch, 500); }
+    }
+    lastModelState = newModel;
+    lastCacheState = newCache;
+  } catch {}
+}
+
+// ── Folder nav ────────────────────────────────────────────────────────────────
+async function loadFolderNav() {
+  try {
+    const data = await (await fetch(`${API}/folders`)).json();
+    document.getElementById('folderNav').innerHTML = data.slice(0,10).map(f => {
+      const name = f.folder.split(/[\\/]/).pop();
+      return `<div class="nav-item" style="font-size:12px;" title="${esc(f.folder)}" onclick="filterByFolder('${esc(f.folder)}')">
+        <span class="ico">📁</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${esc(name)}</span>
+        <span style="font-size:10px;color:var(--muted);">${f.count}</span>
+      </div>`;
+    }).join('');
+    const sel = document.getElementById('folderFilter');
+    sel.innerHTML = '<option value="">All folders</option>' +
+      data.map(f => `<option value="${esc(f.folder)}">${f.folder.split(/[\\/]/).pop()} (${f.count})</option>`).join('');
+  } catch {}
+}
+function filterByFolder(f) { showPanel('search'); document.getElementById('folderFilter').value = f; doSearch(); }
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+function buildTypeGrid() {
+  const grid = document.getElementById('typeGrid');
+  grid.innerHTML = FILE_TYPES.map(t => `
+    <label class="type-chip on" data-ext="${t.ext}">
+      <input type="checkbox" value="${t.ext}" checked/>
+      <span>${t.icon}</span><span>${t.label}</span>
+    </label>`).join('');
+  grid.querySelectorAll('.type-chip').forEach(chip =>
+    chip.addEventListener('click', () => chip.classList.toggle('on', chip.querySelector('input').checked))
+  );
+}
+
+async function loadSettings() {
+  try {
+    const cfg = await (await fetch(`${API}/config`)).json();
+    const exc = cfg.extraction    || {};
+    const sem = cfg.semantic_search || {};
+    const folders = cfg.watch_folders || [];
+    const el = document.getElementById('folderList');
+    el.innerHTML = folders.length
+      ? folders.map((f,i) => `<div class="folder-item"><span class="fp" title="${esc(f)}">📁 ${esc(f)}</span><button class="btn-icon" onclick="removeFolder(${i})">✕</button></div>`).join('')
+      : '<div style="color:var(--muted);font-size:12px;">No folders added yet.</div>';
+
+    document.getElementById('extractEnabled').checked = exc.enabled !== false;
+    document.getElementById('maxSize').value          = exc.max_file_size_mb    || 10;
+    document.getElementById('maxSizeVal').textContent     = (exc.max_file_size_mb||10) + ' MB';
+    document.getElementById('contentCap').value       = exc.content_length_cap || 2000;
+    document.getElementById('contentCapVal').textContent  = (exc.content_length_cap||2000) + ' chars';
+    document.getElementById('throttle').value         = exc.throttle_ms        || 100;
+    document.getElementById('throttleVal').textContent    = (exc.throttle_ms||100) + ' ms';
+
+    const activeExts = new Set(exc.extract_types || []);
+    document.querySelectorAll('#typeGrid .type-chip').forEach(chip => {
+      const cb = chip.querySelector('input');
+      cb.checked = activeExts.has(chip.dataset.ext);
+      chip.classList.toggle('on', cb.checked);
+    });
+
+    const modelName = sem.model_name || 'neuml/pubmedbert-base-embeddings';
+    const sel = document.getElementById('modelSelect');
+    if (sel) sel.value = modelName;
+
+    document.getElementById('semEnabled').checked  = sem.enabled !== false;
+    document.getElementById('semFallback').checked = sem.keyword_fallback !== false;
+    const thresh = Math.round((sem.similarity_threshold || 0.40) * 100);
+    document.getElementById('semThresh').value          = thresh;
+    document.getElementById('threshVal').textContent    = thresh + '%';
+    document.getElementById('excludedList').textContent = (cfg.excluded_extensions||[]).join('  ');
+  } catch {}
+}
+
+async function saveSettings() {
+  try {
+    const cfg = await (await fetch(`${API}/config`)).json();
+    cfg.extraction = {
+      enabled:            document.getElementById('extractEnabled').checked,
+      extract_types:      [...document.querySelectorAll('#typeGrid input:checked')].map(cb => cb.value),
+      max_file_size_mb:   parseInt(document.getElementById('maxSize').value),
+      content_length_cap: parseInt(document.getElementById('contentCap').value),
+      throttle_ms:        parseInt(document.getElementById('throttle').value),
+    };
+    cfg.semantic_search = {
+      enabled:              document.getElementById('semEnabled').checked,
+      keyword_fallback:     document.getElementById('semFallback').checked,
+      similarity_threshold: parseInt(document.getElementById('semThresh').value) / 100,
+      model_name:           document.getElementById('modelSelect').value,
+    };
+    await fetch(`${API}/config`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg) });
+    showToast('✅','Settings Saved','Re-index to apply extraction changes');
+  } catch { showToast('⚠️','Error','Could not save settings'); }
+}
+
+async function addFolder() {
+  const input = document.getElementById('newFolderInput');
+  const path  = input.value.trim();
+  if (!path) return;
+  const cfg = await (await fetch(`${API}/config`)).json();
+  if (!cfg.watch_folders.includes(path)) cfg.watch_folders.push(path);
+  await fetch(`${API}/config`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg) });
+  input.value = '';
+  loadSettings();
+  showToast('✅','Folder Added', path);
+}
+async function removeFolder(idx) {
+  const cfg = await (await fetch(`${API}/config`)).json();
+  cfg.watch_folders.splice(idx, 1);
+  await fetch(`${API}/config`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg) });
+  loadSettings();
+  showToast('🗑','Folder Removed','');
+}
+async function stopIndex() {
+  try {
+    await fetch(`${API}/index/stop`, {method:'POST'});
+    showToast('⏹','Stop Requested','Finishing current file then stopping…');
+  } catch { showToast('⚠️','Error','Backend not reachable'); }
+}
+
+async function triggerIndex() {
+  try {
+    const d = await (await fetch(`${API}/index`, {method:'POST'})).json();
+    showToast(d.error?'⚠️':'▶', d.error?'Error':'Indexing Started', d.error||'This may take a few minutes…');
+  } catch { showToast('⚠️','Error','Backend not reachable'); }
+}
+async function cleanStale() {
+  showToast('🧹','Cleaning…','Checking for deleted files');
+  try {
+    const d = await (await fetch(`${API}/clean`, {method:'POST'})).json();
+    showToast('🧹', d.removed===0?'All Clean':'Done',
+      d.removed===0 ? 'No stale entries found' : `${d.removed} stale entr${d.removed===1?'y':'ies'} removed`);
+    pollStatus();
+  } catch { showToast('⚠️','Error','Backend not reachable'); }
+}
+async function clearIndex() {
+  if (!confirm('Clear the entire file index?')) return;
+  await fetch(`${API}/clear`, {method:'POST'});
+  showToast('🗑','Index Cleared','Click Start Indexing to rebuild');
+  pollStatus();
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function highlight(name, q) {
+  return q.trim().split(/\s+/).filter(Boolean).reduce((acc, t) =>
+    acc.replace(new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi'),
+      '<mark style="background:rgba(92,110,248,.35);color:#c7d0ff;border-radius:2px;padding:0 2px;">$1</mark>'), name);
+}
+function fmtSize(b) { if(!b)return'—'; if(b<1024)return b+'B'; if(b<1048576)return(b/1024).toFixed(1)+'KB'; return(b/1048576).toFixed(1)+'MB'; }
+function fileIcon(ext) {
+  return ({'.pdf':'📄','.doc':'📝','.docx':'📝','.xls':'📊','.xlsx':'📊','.ppt':'📑','.pptx':'📑',
+    '.txt':'🗒️','.csv':'🗒️','.jpg':'🖼️','.jpeg':'🖼️','.png':'🖼️','.gif':'🖼️',
+    '.zip':'🗜️','.rar':'🗜️','.py':'🐍','.js':'📜','.html':'🌐','.sql':'🗃️',
+    '.mp4':'🎬','.mp3':'🎵','.eml':'📧','.msg':'📧'})[ext?.toLowerCase()] || '📁';
+}
+function pulseCard(card) { if(!card)return; card.classList.remove('card-pulse'); void card.offsetWidth; card.classList.add('card-pulse'); setTimeout(()=>card.classList.remove('card-pulse'),700); }
+function showToast(icon, title, sub) {
+  const t = document.getElementById('toast');
+  document.getElementById('toastIcon').textContent  = icon;
+  document.getElementById('toastTitle').textContent = title;
+  document.getElementById('toastSub').textContent   = sub || '';
+  t.classList.add('show');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+</script>
+</body>
+</html>
