@@ -40,6 +40,7 @@
   .pill.busy  { background:rgba(244,169,78,.15);  color:var(--yellow); }
   .pill.off   { background:rgba(122,127,153,.15); color:var(--muted); }
   .pill.error { background:rgba(224,92,106,.15);  color:var(--red); }
+  .pill.stopping { background:rgba(224,92,106,.15); color:var(--red); }
   .idx-count   { color:var(--muted); margin-top:4px; font-size:11px; }
   .idx-current { color:var(--muted); font-size:10px; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
@@ -363,7 +364,8 @@
 </div>
 
 <script>
-const API       = 'http://localhost:5000/api';
+// FIX: use relative URL so it works behind proxies / on any port
+const API       = '/api';
 let searchTimer = null;
 let activeTypes = '';
 let activeTab   = 'keyword';
@@ -451,15 +453,22 @@ function updateTabs() {
   document.getElementById('semCount').textContent = sem;
   document.getElementById('resultTabs').style.display = allResults.length ? 'flex' : 'none';
 
-  // Disable semantic tab if no semantic results
+  // Disable tabs with no results
   const semTab = document.getElementById('tabSemantic');
+  const kwTab  = document.getElementById('tabKeyword');
   semTab.classList.toggle('tab-disabled', sem === 0);
+  kwTab.classList.toggle('tab-disabled',  kw  === 0);
 
-  // If currently on semantic tab but no results, switch to keyword
+  // FIX: auto-switch to the tab that has results
   if (activeTab === 'semantic' && sem === 0 && kw > 0) {
     activeTab = 'keyword';
-    document.getElementById('tabKeyword').classList.add('active');
-    document.getElementById('tabSemantic').classList.remove('active');
+    kwTab.classList.add('active');
+    semTab.classList.remove('active');
+  } else if (activeTab === 'keyword' && kw === 0 && sem > 0) {
+    // Auto-switch to semantic if keyword has nothing
+    activeTab = 'semantic';
+    semTab.classList.add('active');
+    kwTab.classList.remove('active');
   }
 }
 
@@ -565,27 +574,52 @@ async function pollStatus() {
   try {
     const d   = await (await fetch(`${API}/status`)).json();
     const idx = d.indexing;
-    document.getElementById('idxCount').textContent = `${d.indexed_files.toLocaleString()} files · ${d.embedded_files.toLocaleString()} embedded`;
+
+    // FIX: show skipped count during indexing
+    const skipped = idx.skipped || 0;
+    const countStr = skipped > 0
+      ? `${d.indexed_files.toLocaleString()} files · ${d.embedded_files.toLocaleString()} embedded · ${skipped} skipped`
+      : `${d.indexed_files.toLocaleString()} files · ${d.embedded_files.toLocaleString()} embedded`;
+    document.getElementById('idxCount').textContent = countStr;
+
     if (idx.running) {
-      document.getElementById('statusPill').className = 'pill busy';
-      document.getElementById('statusPill').innerHTML = 'Indexing<span class="spinner"></span>';
+      const pill = document.getElementById('statusPill');
+      // FIX: show "Stopping…" state when stop has been requested
+      if (idx.stop_requested) {
+        pill.className = 'pill stopping';
+        pill.innerHTML = 'Stopping…<span class="spinner"></span>';
+      } else {
+        pill.className = 'pill busy';
+        pill.innerHTML = 'Indexing<span class="spinner"></span>';
+      }
       document.getElementById('idxCurrent').textContent = idx.current.split(/[\\/]/).pop();
     } else {
       document.getElementById('statusPill').className   = 'pill idle';
       document.getElementById('statusPill').textContent = 'Idle';
-      document.getElementById('idxCurrent').textContent = idx.error || '';
+      const statusMsg = idx.error || '';
+      document.getElementById('idxCurrent').textContent = statusMsg;
     }
+
     const wp = document.getElementById('watchPill');
     wp.textContent = d.watching?.active ? 'On' : 'Off';
     wp.className   = d.watching?.active ? 'pill idle' : 'pill off';
 
-    // Show/hide stop button based on indexing state
+    // FIX: improved stop/start button state with stopping state
     const btnStart = document.getElementById('btnStartIndex');
     const btnStop  = document.getElementById('btnStopIndex');
     if (btnStart && btnStop) {
-      const running = idx.running;
-      btnStart.style.display = running ? 'none' : '';
-      btnStop.style.display  = running ? ''     : 'none';
+      if (idx.running) {
+        btnStart.style.display = 'none';
+        btnStop.style.display  = '';
+        // Disable stop button if stop already requested
+        btnStop.disabled = !!idx.stop_requested;
+        btnStop.textContent = idx.stop_requested ? '⏳ Stopping…' : '⏹ Stop Indexing';
+      } else {
+        btnStart.style.display = '';
+        btnStop.style.display  = 'none';
+        btnStop.disabled = false;
+        btnStop.textContent = '⏹ Stop Indexing';
+      }
     }
 
     const mp  = document.getElementById('modelPill');
@@ -732,10 +766,18 @@ async function removeFolder(idx) {
   loadSettings();
   showToast('🗑','Folder Removed','');
 }
+
 async function stopIndex() {
   try {
-    await fetch(`${API}/index/stop`, {method:'POST'});
-    showToast('⏹','Stop Requested','Finishing current file then stopping…');
+    const resp = await fetch(`${API}/index/stop`, {method:'POST'});
+    const d    = await resp.json();
+    if (d.error) {
+      showToast('⚠️','Cannot Stop', d.error);
+    } else {
+      showToast('⏹','Stop Requested','Finishing current file then stopping…');
+      // Immediately refresh status so UI shows "Stopping…"
+      pollStatus();
+    }
   } catch { showToast('⚠️','Error','Backend not reachable'); }
 }
 
@@ -743,6 +785,8 @@ async function triggerIndex() {
   try {
     const d = await (await fetch(`${API}/index`, {method:'POST'})).json();
     showToast(d.error?'⚠️':'▶', d.error?'Error':'Indexing Started', d.error||'This may take a few minutes…');
+    // Immediately refresh status so UI shows indexing state
+    if (!d.error) pollStatus();
   } catch { showToast('⚠️','Error','Backend not reachable'); }
 }
 async function cleanStale() {
@@ -762,7 +806,7 @@ async function clearIndex() {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function highlight(name, q) {
   return q.trim().split(/\s+/).filter(Boolean).reduce((acc, t) =>
     acc.replace(new RegExp(`(${t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi'),
