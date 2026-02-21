@@ -1,4 +1,4 @@
-# 🔍 DeepFind — Semantic File Search for Pharma & Beyond
+# 🔍 DeepFind: Semantic File Search for Pharma & Beyond
 
 A local, privacy-first semantic file search engine. Find any document by **meaning** and not just filename keywords — with zero cloud dependency. All AI processing happens entirely on your machine.
 
