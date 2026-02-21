@@ -1,14 +1,14 @@
-# 🔍 File Finder — Semantic File Search for Pharma & Beyond
+# 🔍 DeepFind — Semantic File Search for Pharma & Beyond
 
-A local, privacy-first semantic file search engine. Find any document by **meaning** — not just filename keywords — with zero cloud dependency. All AI processing happens entirely on your machine.
+A local, privacy-first semantic file search engine. Find any document by **meaning** and not just filename keywords — with zero cloud dependency. All AI processing happens entirely on your machine.
 
 Built with pharmacovigilance professionals in mind, but useful for anyone managing large collections of documents.
 
 ---
 
-## Why File Finder?
+## Why DeepFind?
 
-Windows Search is keyword-only and frequently misses files with non-obvious names. File Finder uses AI embeddings to understand the *meaning* of your search:
+Windows Search is keyword-only and frequently misses files with non-obvious names. DeepFind uses AI embeddings to understand the *meaning* of your search:
 
 | You search for | It finds |
 |---|---|
@@ -94,7 +94,7 @@ Results ranked in strict order:
 
 ## Pharma Domain Features
 
-File Finder has built-in knowledge of pharmacovigilance terminology:
+DeepFind has built-in knowledge of pharmacovigilance terminology:
 
 - **Abbreviation expansion** — searching `PSUR` also matches files containing *periodic safety update report*, *PBRER*, *periodic report*
 - **Regulatory synonyms** — `RMP` ↔ *risk management plan* ↔ *safety specification*
@@ -174,5 +174,5 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## Author
 
-Built by [Your Name](https://github.com/YOUR_USERNAME)  
-Pharmacovigilance Analytics Professional | [LinkedIn](https://linkedin.com/in/YOUR_PROFILE)
+Built by [Gaurav Goel](https://github.com/gauravkantgoel)  
+Pharmacovigilance Analytics Professional | [LinkedIn](https://www.linkedin.com/in/gauravkantgoel/)
