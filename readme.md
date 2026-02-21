@@ -71,7 +71,7 @@ Your browser opens automatically at `http://localhost:5000/ui`
 - The AI model downloads automatically on first run (~440 MB, one time only)
 
 **6. Search**
-- Type naturally — `PSUR 2024` or `Novartis PV agreement` or `signal detection SOP`
+- Type naturally — `PSUR 2024` or `PV agreement` or `signal detection SOP`
 - Use the **Keyword & Content** tab for exact matches
 - Use the **Semantic AI** tab for meaning-based results
 
