@@ -30,6 +30,20 @@ CONFIG_PATH = "config.json"
 
 # ── Default config ─────────────────────────────────────────────────────────────
 
+CODE_EXTENSIONS = [
+    ".js",".jsx",".ts",".tsx",".py",".pyc",".pyo",".pyd",
+    ".java",".class",".jar",".c",".cpp",".h",".hpp",".cs",
+    ".go",".rs",".rb",".php",".swift",".kt",".scala",".sh",
+    ".bat",".ps1",".cmd",".vbs",".r",".m",".lua",".pl",
+    ".sql",".html",".htm",".css",".scss",".sass",".less",
+    ".json",".xml",".yaml",".yml",".toml",".conf",".cfg",
+    ".map",".min.js",".min.css",".lock",".gitignore",
+    ".env",".bak",".swp",".sln",".csproj",".vcxproj",
+    ".gradle",".cmake",".makefile",".dockerfile",
+    ".whl",".egg",".gem",".so",".dylib",".o",".obj",
+    ".node_modules",".DS_Store",
+]
+
 DEFAULT_CONFIG = {
     "watch_folders": [],
     "excluded_extensions": [".tmp",".log",".sys",".dll",".exe",
@@ -47,6 +61,10 @@ DEFAULT_CONFIG = {
         "similarity_threshold": 0.40
     }
 }
+
+def get_effective_exclusions(cfg):
+    """Exclusions for INDEXING only — system junk files, not code files."""
+    return set(cfg.get("excluded_extensions", []))
 
 def load_config():
     if os.path.exists(CONFIG_PATH):
@@ -105,6 +123,7 @@ def init_db():
             name        TEXT NOT NULL,
             path        TEXT NOT NULL UNIQUE,
             folder      TEXT NOT NULL,
+            watch_root  TEXT,
             extension   TEXT,
             size        INTEGER,
             modified    REAL,
@@ -113,16 +132,17 @@ def init_db():
             embedding   TEXT
         )
     """)
-    for col, typ in [("content","TEXT"),("embedding","TEXT")]:
+    for col, typ in [("content","TEXT"),("embedding","TEXT"),("watch_root","TEXT")]:
         try:
             conn.execute(f"ALTER TABLE files ADD COLUMN {col} {typ}")
         except Exception:
             pass
     for idx in [
-        "CREATE INDEX IF NOT EXISTS idx_name   ON files(name)",
-        "CREATE INDEX IF NOT EXISTS idx_folder ON files(folder)",
-        "CREATE INDEX IF NOT EXISTS idx_ext    ON files(extension)",
-        "CREATE INDEX IF NOT EXISTS idx_mod    ON files(modified DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_name       ON files(name)",
+        "CREATE INDEX IF NOT EXISTS idx_folder     ON files(folder)",
+        "CREATE INDEX IF NOT EXISTS idx_watchroot  ON files(watch_root)",
+        "CREATE INDEX IF NOT EXISTS idx_ext        ON files(extension)",
+        "CREATE INDEX IF NOT EXISTS idx_mod        ON files(modified DESC)",
     ]:
         conn.execute(idx)
     conn.commit()
@@ -354,7 +374,7 @@ indexing_status = {
 
 def index_folder(folder_path, tracker):
     cfg       = load_config()
-    excl      = set(cfg.get("excluded_extensions", []))
+    excl      = get_effective_exclusions(cfg)
     exc_cfg   = cfg.get("extraction", {})
     do_ext    = exc_cfg.get("enabled", True)
     ext_types = set(exc_cfg.get("extract_types", []))
@@ -400,14 +420,14 @@ def index_folder(folder_path, tracker):
                     embedding = json.dumps(emb)
                     tracker["embedded"] += 1
 
-                # FIX: store actual parent directory, not watch root
+                # Store both: watch_root (configured root) and folder (actual parent dir)
                 actual_folder = os.path.dirname(fpath)
 
                 conn.execute("""
                     INSERT OR REPLACE INTO files
-                    (name, path, folder, extension, size, modified, indexed_at, content, embedding)
-                    VALUES (?,?,?,?,?,?,?,?,?)
-                """, (fname, fpath, actual_folder, ext,
+                    (name, path, folder, watch_root, extension, size, modified, indexed_at, content, embedding)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (fname, fpath, actual_folder, folder_path, ext,
                       st.st_size, st.st_mtime, time.time(), content, embedding))
                 conn.commit()
                 tracker["count"]   += 1
@@ -456,8 +476,8 @@ class FileChangeHandler(FileSystemEventHandler):
         self.root = root
 
     def _valid(self, path):
-        cfg  = get_cached_config()                   # FIX: cached, not re-read every event
-        excl = set(cfg.get("excluded_extensions", []))
+        cfg  = get_cached_config()
+        excl = get_effective_exclusions(cfg)
         name = os.path.basename(path)
         return not name.startswith(".") and Path(name).suffix.lower() not in excl
 
@@ -510,14 +530,15 @@ class FileChangeHandler(FileSystemEventHandler):
                 emb       = model.encode(f"{fname} {content or ''}", convert_to_numpy=True).tolist()
                 embedding = json.dumps(emb)
 
-            actual_folder = os.path.dirname(path)    # FIX: actual parent dir
+            actual_folder = os.path.dirname(path)
+            watch_root    = self.root                # the configured watch folder
 
             conn = get_db()
             conn.execute("""
                 INSERT OR REPLACE INTO files
-                (name, path, folder, extension, size, modified, indexed_at, content, embedding)
-                VALUES (?,?,?,?,?,?,?,?,?)
-            """, (fname, path, actual_folder, ext,
+                (name, path, folder, watch_root, extension, size, modified, indexed_at, content, embedding)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            """, (fname, path, actual_folder, watch_root, ext,
                   st.st_size, st.st_mtime, time.time(), content, embedding))
             conn.commit(); conn.close()
             schedule_cache_rebuild(30)
@@ -558,6 +579,7 @@ def fmt_row(r, tier=1, score=None):
     }
 
 def build_where(extra_conds, extra_params, types, folder, exclude_paths=None):
+    """Build SQL WHERE clause. folder uses path prefix matching."""
     conds  = list(extra_conds)
     params = list(extra_params)
     if types:
@@ -565,8 +587,10 @@ def build_where(extra_conds, extra_params, types, folder, exclude_paths=None):
         conds.append(f"extension IN ({','.join(['?']*len(exts))})")
         params.extend(exts)
     if folder:
-        conds.append("folder = ?")
-        params.append(folder)
+        # Path prefix match — works for both watch roots and subfolders
+        normalized = folder.replace("\\", "/").rstrip("/")
+        conds.append("(REPLACE(path, '\\', '/') LIKE ?)")
+        params.append(normalized + "/%")
     if exclude_paths:
         ep = list(exclude_paths)
         conds.append(f"path NOT IN ({','.join(['?']*len(ep))})")
@@ -605,7 +629,7 @@ def tier2_some_keywords_in_filename(terms, types, folder, limit, seen):
 
 def tier3_content_keyword(terms, types, folder, limit, seen):
     """Any query term found in extracted document content (not filename)."""
-    or_conds  = " OR ".join([f"LOWER(COALESCE(content,'')) LIKE ?" for _ in terms])
+    or_conds  = " OR ".join([f"LOWER(COALESCE(content,\'\')) LIKE ?" for _ in terms])
     name_none = " AND ".join([f"LOWER(name) NOT LIKE ?" for _ in terms])
     conds  = [f"({or_conds})", f"content IS NOT NULL", f"({name_none})"]
     params = [f"%{t}%" for t in terms] + [f"%{t}%" for t in terms]
@@ -618,34 +642,44 @@ def tier3_content_keyword(terms, types, folder, limit, seen):
     conn.close()
     return [fmt_row(r, tier=3) for r in rows]
 
-def tier4_semantic(query, types, folder, limit, threshold, seen):
-    """Semantic similarity search. 'seen' is only used to avoid duplicates."""
+def tier4_semantic(query, types, folder, limit, threshold, keyword_paths):
+    """
+    Semantic similarity search.
+    Returns (unique_results, overlap_count).
+    """
     if not model_status["loaded"] or _cache_state["building"]:
-        return []
+        return [], 0
     with _emb_lock:
         matrix = _emb_matrix
         paths  = list(_emb_paths)
     if matrix is None or len(paths) == 0:
-        return []
+        return [], 0
     try:
         model = get_model()
         q_vec = model.encode(query, convert_to_numpy=True).astype(np.float32)
         q_vec = q_vec / (np.linalg.norm(q_vec) or 1)
         sims  = matrix.dot(q_vec)
     except Exception:
-        return []
+        return [], 0
 
-    # FIX: don't exclude keyword-matched paths — semantic tab runs independently
-    above = [(i, float(sims[i])) for i in range(len(paths))
-             if sims[i] >= threshold and paths[i] not in seen]
-    if not above:
-        return []
+    kw_set  = set(keyword_paths)
+    unique  = []
+    overlap = 0
+    for i in range(len(paths)):
+        if sims[i] >= threshold:
+            if paths[i] in kw_set:
+                overlap += 1
+            else:
+                unique.append((i, float(sims[i])))
 
-    above.sort(key=lambda x: x[1], reverse=True)
-    above = above[:limit]
+    if not unique:
+        return [], overlap
 
-    matching_paths = [paths[i] for i, _ in above]
-    path_to_score  = {paths[i]: s for i, s in above}
+    unique.sort(key=lambda x: x[1], reverse=True)
+    unique = unique[:limit]
+
+    matching_paths = [paths[i] for i, _ in unique]
+    path_to_score  = {paths[i]: s for i, s in unique}
 
     conds, params = [], []
     if types:
@@ -653,12 +687,13 @@ def tier4_semantic(query, types, folder, limit, threshold, seen):
         conds.append(f"extension IN ({','.join(['?']*len(exts))})")
         params.extend(exts)
     if folder:
-        conds.append("folder = ?")
-        params.append(folder)
+        normalized = folder.replace("\\", "/").rstrip("/")
+        conds.append("(REPLACE(path, '\\', '/') LIKE ?)")
+        params.append(normalized + "/%")
     ph = ",".join(["?" for _ in matching_paths])
     conds.append(f"path IN ({ph})")
     params.extend(matching_paths)
-    where = " AND ".join(conds)
+    where = " AND ".join(conds) if conds else "1=1"
 
     conn = get_db()
     rows = conn.execute(f"SELECT * FROM files WHERE {where}", params).fetchall()
@@ -669,22 +704,22 @@ def tier4_semantic(query, types, folder, limit, threshold, seen):
         score = path_to_score.get(r["path"], 0)
         results.append((score, fmt_row(r, tier=4, score=score)))
     results.sort(key=lambda x: x[0], reverse=True)
-    return [r for _, r in results]
+    return [r for _, r in results], overlap
+
+_CODE_EXT_SET = set(CODE_EXTENSIONS)
 
 def hybrid_search(query, types, folder, limit, threshold):
     """
     4-tier search pipeline.
-    Tiers 1-3 (keyword) and Tier 4 (semantic) run INDEPENDENTLY
-    so both tabs in the UI always get populated.
+    Returns (results, mode, semantic_overlap).
     """
     terms = [t for t in query.lower().split() if len(t) > 1]
     if not terms:
-        return [], "keyword"
+        return [], "keyword", 0
 
     seen    = set()
     results = []
 
-    # ── Keyword tiers (1-3) ──
     t1 = tier1_all_keywords_in_filename(terms, types, folder, limit, seen)
     results.extend(t1)
     seen.update(r["path"] for r in t1)
@@ -701,18 +736,16 @@ def hybrid_search(query, types, folder, limit, threshold):
         results.extend(t3)
         seen.update(r["path"] for r in t3)
 
-    # ── FIX: Tier 4 — semantic runs INDEPENDENTLY with its own limit ──
-    # Not gated behind `remaining > 0`. Uses empty seen set so files
-    # found by keywords can ALSO appear in the Semantic AI tab.
+    semantic_overlap = 0
     if model_status["loaded"] and not _cache_state["building"]:
         expanded_q, _ = expand_pharma_query(query)
-        t4 = tier4_semantic(expanded_q, types, folder, limit, threshold, set())
+        t4, semantic_overlap = tier4_semantic(expanded_q, types, folder, limit, threshold, seen)
         results.extend(t4)
 
     has_semantic = any(r["tier"] == 4 for r in results)
     warming_up   = model_status["loading"] or _cache_state["building"]
     mode = "semantic" if has_semantic else ("warming_up" if warming_up else "keyword")
-    return results, mode
+    return results, mode, semantic_overlap
 
 # ── API routes ─────────────────────────────────────────────────────────────────
 
@@ -732,7 +765,8 @@ def api_status():
     })
 
 @app.route("/api/config", methods=["GET"])
-def api_get_config(): return jsonify(load_config())
+def api_get_config():
+    return jsonify(load_config())
 
 @app.route("/api/config", methods=["POST"])
 def api_save_config():
@@ -776,32 +810,54 @@ def api_clean():
 
 @app.route("/api/search")
 def api_search():
-    query  = request.args.get("q", "").strip()
-    types  = request.args.get("types", "").strip()
-    folder = request.args.get("folder", "").strip()
-    limit  = min(int(request.args.get("limit", 100)), 500)
-    if not query: return jsonify([])
+    query     = request.args.get("q", "").strip()
+    types     = request.args.get("types", "").strip()
+    folder    = request.args.get("folder", "").strip()
+    hide_code = request.args.get("hide_code", "0") == "1"
+    limit     = min(int(request.args.get("limit", 100)), 500)
+    if not query: return jsonify({"results": [], "semantic_overlap": 0})
 
     cfg       = load_config()
     sem_cfg   = cfg.get("semantic_search", {})
     threshold = sem_cfg.get("similarity_threshold", 0.40)
 
-    results, mode = hybrid_search(query, types, folder, limit, threshold)
+    results, mode, semantic_overlap = hybrid_search(query, types, folder, limit, threshold)
+
+    # Code file filtering — done in Python, not SQL (avoids 50+ param bloat)
+    if hide_code:
+        results = [r for r in results if r.get("extension","").lower() not in _CODE_EXT_SET]
 
     pharma_active = any(r.get("tier") == 4 for r in results)
     for r in results:
         r["search_mode"]     = mode
         r["pharma_expanded"] = pharma_active and mode == "semantic"
-    return jsonify(results)
+
+    return jsonify({
+        "results":          results,
+        "semantic_overlap":  semantic_overlap,
+        "mode":             mode
+    })
 
 @app.route("/api/folders")
 def api_folders():
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT folder, COUNT(*) AS cnt FROM files GROUP BY folder ORDER BY cnt DESC"
-    ).fetchall()
+    """Return configured watch folders with file counts."""
+    cfg     = load_config()
+    folders = cfg.get("watch_folders", [])
+    conn    = get_db()
+
+    result = []
+    for f in folders:
+        # Count files whose path starts with this watch folder
+        normalized = f.replace("\\", "/").rstrip("/")
+        cnt = conn.execute(
+            "SELECT COUNT(*) AS c FROM files WHERE REPLACE(path, '\\', '/') LIKE ?",
+            (normalized + "/%",)
+        ).fetchone()["c"]
+        name = os.path.basename(f.rstrip("/\\")) or f
+        result.append({"path": f, "name": name, "count": cnt})
+
     conn.close()
-    return jsonify([{"folder": r["folder"], "count": r["cnt"]} for r in rows])
+    return jsonify(result)
 
 def _validate_path(path):
     """FIX: ensure requested path is within an indexed watch folder."""
