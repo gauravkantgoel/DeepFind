@@ -12,7 +12,6 @@ Windows Search is keyword-only and frequently misses files with non-obvious name
 
 | You search for | It finds |
 |---|---|
-| `Novartis safety agreement` | `PV_NVS_partnership_v3_FINAL.pdf` |
 | `quarterly financial report` | `Q3_2024_summary.xlsx` |
 | `signal detection procedure` | `SOP_ADR_SignalMgmt_v2.docx` |
 | `PSUR` | All periodic safety update reports, even if named differently |
