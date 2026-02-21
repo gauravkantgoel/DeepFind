@@ -1,7 +1,18 @@
 """
-File Finder - Phase 2 Backend
+File Finder - Phase 2 Backend (Fixed)
 pip install flask flask-cors watchdog sentence-transformers pymupdf python-docx openpyxl numpy
 python app.py  →  open http://localhost:5000/ui
+
+Fixes applied:
+  - Stop Indexing now actually works (checked in both loops, reset on start)
+  - Semantic AI tab populated independently (not gated behind keyword results)
+  - Config file handle leak fixed
+  - Config cached for watchdog (not re-read on every FS event)
+  - Delta indexing: skip files whose mtime hasn't changed
+  - Folder column stores actual parent directory (not watch root)
+  - Thread-safe cache rebuild with proper locking
+  - Path validation on open/open-folder endpoints
+  - .doc extraction warning (python-docx only supports .docx)
 """
 
 from flask import Flask, jsonify, request, send_file
@@ -25,7 +36,7 @@ DEFAULT_CONFIG = {
                             ".ini",".dat",".db",".lnk",".url",".pst",".ost"],
     "extraction": {
         "enabled":            True,
-        "extract_types":      [".pdf",".docx",".doc",".xlsx",".xls",".txt",".csv"],
+        "extract_types":      [".pdf",".docx",".xlsx",".xls",".txt",".csv"],
         "max_file_size_mb":   10,
         "content_length_cap": 2000,
         "throttle_ms":        100
@@ -33,13 +44,14 @@ DEFAULT_CONFIG = {
     "semantic_search": {
         "enabled":              True,
         "keyword_fallback":     True,
-        "similarity_threshold": 0.40    # raised from 0.20 — eliminates false positives
+        "similarity_threshold": 0.40
     }
 }
 
 def load_config():
     if os.path.exists(CONFIG_PATH):
-        saved = json.load(open(CONFIG_PATH))
+        with open(CONFIG_PATH, "r") as f:          # FIX: proper file handle
+            saved = json.load(f)
         for k, v in DEFAULT_CONFIG.items():
             if k not in saved:
                 saved[k] = v
@@ -51,10 +63,32 @@ def load_config():
     return dict(DEFAULT_CONFIG)
 
 def save_config(cfg):
+    global _config_cache, _config_cache_time
     with open(CONFIG_PATH, "w") as f:
         json.dump(cfg, f, indent=2)
+    # Invalidate cache on save
+    _config_cache = cfg
+    _config_cache_time = time.time()
+
+# ── Cached config for hot paths (watchdog etc.) ──────────────────────────────
+
+_config_cache      = None
+_config_cache_time = 0
+_CONFIG_TTL        = 5          # seconds
+
+def get_cached_config():
+    """Return config from cache if fresh, otherwise reload. Used by watchdog."""
+    global _config_cache, _config_cache_time
+    now = time.time()
+    if _config_cache is not None and (now - _config_cache_time) < _CONFIG_TTL:
+        return _config_cache
+    _config_cache = load_config()
+    _config_cache_time = now
+    return _config_cache
 
 # ── Database ───────────────────────────────────────────────────────────────────
+
+_db_lock = threading.Lock()
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
@@ -126,19 +160,23 @@ _emb_paths   = []
 _emb_lock    = threading.Lock()
 _cache_state = {"ready": False, "building": False, "count": 0}
 
-# Debounce: only rebuild if no new events in 30s, and not during active indexing
-_rebuild_timer = None
+_rebuild_timer      = None
+_rebuild_guard_lock = threading.Lock()       # FIX: proper guard for rebuild
 
 def rebuild_cache():
     global _emb_matrix, _emb_paths
-    if not model_status["loaded"]:          # don't build without model
+
+    if not model_status["loaded"]:
         return
-    if indexing_status.get("running"):      # don't build mid-index
-        return
-    if _cache_state["building"]:
+    if indexing_status.get("running"):
         return
 
-    _cache_state.update({"building": True, "ready": False})
+    # FIX: atomic check-and-set with lock to prevent double-builds
+    with _rebuild_guard_lock:
+        if _cache_state["building"]:
+            return
+        _cache_state.update({"building": True, "ready": False})
+
     try:
         conn = get_db()
         rows = conn.execute(
@@ -247,8 +285,6 @@ def expand_pharma_query(query):
     q_lower = query.lower().strip()
     words   = q_lower.split()
 
-    # Don't expand single short tokens (1-4 chars) — too risky e.g. "ae", "soc"
-    # Only expand if query is multi-word OR is a known long-form term
     is_multi_word   = len(words) > 1
     is_known_abbrev = any(q_lower == key for key in PHARMA_SYNONYMS)
 
@@ -279,9 +315,17 @@ def extract_text(path, ext, cfg):
             doc  = fitz.open(path)
             text = " ".join(page.get_text() for page in doc[:5])
             doc.close()
-        elif ext in (".docx", ".doc"):
+        elif ext == ".docx":
             from docx import Document
             text = " ".join(p.text for p in Document(path).paragraphs if p.text.strip())
+        elif ext == ".doc":
+            # FIX: python-docx doesn't support .doc — try antiword, else skip
+            try:
+                result = subprocess.run(["antiword", path], capture_output=True, text=True, timeout=10)
+                text = result.stdout if result.returncode == 0 else ""
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                print(f"  ⚠ Skipping .doc (antiword not installed): {path}")
+                return None
         elif ext in (".xlsx", ".xls"):
             import openpyxl
             wb    = openpyxl.load_workbook(path, read_only=True, data_only=True)
@@ -302,7 +346,11 @@ def extract_text(path, ext, cfg):
 
 # ── Indexing ───────────────────────────────────────────────────────────────────
 
-indexing_status = {"running": False, "count": 0, "current": "", "error": None, "embedded": 0}
+indexing_status = {
+    "running": False, "count": 0, "current": "",
+    "error": None, "embedded": 0, "skipped": 0,
+    "stop_requested": False                         # FIX: explicit field
+}
 
 def index_folder(folder_path, tracker):
     cfg       = load_config()
@@ -317,14 +365,31 @@ def index_folder(folder_path, tracker):
     conn      = get_db()
 
     for root, dirs, files in os.walk(folder_path):
+        # ── FIX: check stop flag at directory level ──
+        if tracker.get("stop_requested"):
+            break
+
         dirs[:] = [d for d in dirs if not d.startswith(".")]
         for fname in files:
+            # ── FIX: check stop flag at file level ──
+            if tracker.get("stop_requested"):
+                break
+
             if fname.startswith("."): continue
             ext   = Path(fname).suffix.lower()
             if ext in excl: continue
             fpath = os.path.join(root, fname)
             try:
-                st        = os.stat(fpath)
+                st = os.stat(fpath)
+
+                # ── FIX: delta indexing — skip unchanged files ──
+                existing = conn.execute(
+                    "SELECT modified FROM files WHERE path = ?", (fpath,)
+                ).fetchone()
+                if existing and abs((existing["modified"] or 0) - st.st_mtime) < 0.001:
+                    tracker["skipped"] = tracker.get("skipped", 0) + 1
+                    continue
+
                 content   = None
                 embedding = None
                 if do_ext and ext in ext_types and st.st_size <= max_mb:
@@ -334,11 +399,15 @@ def index_folder(folder_path, tracker):
                     emb       = model.encode(emb_text, convert_to_numpy=True).tolist()
                     embedding = json.dumps(emb)
                     tracker["embedded"] += 1
+
+                # FIX: store actual parent directory, not watch root
+                actual_folder = os.path.dirname(fpath)
+
                 conn.execute("""
                     INSERT OR REPLACE INTO files
                     (name, path, folder, extension, size, modified, indexed_at, content, embedding)
                     VALUES (?,?,?,?,?,?,?,?,?)
-                """, (fname, fpath, folder_path, ext,
+                """, (fname, fpath, actual_folder, ext,
                       st.st_size, st.st_mtime, time.time(), content, embedding))
                 conn.commit()
                 tracker["count"]   += 1
@@ -353,10 +422,20 @@ def run_indexing():
     global indexing_status
     cfg     = load_config()
     folders = cfg.get("watch_folders", [])
-    indexing_status.update({"running": True, "count": 0, "current": "",
-                             "error": None, "embedded": 0})
+
+    # FIX: reset all status fields including stop_requested
+    indexing_status.update({
+        "running": True, "count": 0, "current": "",
+        "error": None, "embedded": 0, "skipped": 0,
+        "stop_requested": False
+    })
     try:
         for folder in folders:
+            # ── FIX: check stop flag between folders ──
+            if indexing_status.get("stop_requested"):
+                indexing_status["error"] = "Stopped by user"
+                break
+
             if os.path.isdir(folder):
                 index_folder(folder, indexing_status)
             else:
@@ -365,7 +444,6 @@ def run_indexing():
         indexing_status["error"] = str(e)
     finally:
         indexing_status["running"] = False
-        # Rebuild cache after indexing completes
         threading.Thread(target=rebuild_cache, daemon=True).start()
 
 # ── Watchdog ───────────────────────────────────────────────────────────────────
@@ -378,7 +456,7 @@ class FileChangeHandler(FileSystemEventHandler):
         self.root = root
 
     def _valid(self, path):
-        cfg  = load_config()
+        cfg  = get_cached_config()                   # FIX: cached, not re-read every event
         excl = set(cfg.get("excluded_extensions", []))
         name = os.path.basename(path)
         return not name.startswith(".") and Path(name).suffix.lower() not in excl
@@ -393,21 +471,29 @@ class FileChangeHandler(FileSystemEventHandler):
 
     def on_deleted(self, event):
         if not event.is_directory:
-            conn = get_db()
-            conn.execute("DELETE FROM files WHERE path = ?", (event.src_path,))
-            conn.commit(); conn.close()
+            try:
+                conn = get_db()
+                conn.execute("DELETE FROM files WHERE path = ?", (event.src_path,))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
             schedule_cache_rebuild(30)
 
     def on_moved(self, event):
         if not event.is_directory:
-            conn = get_db()
-            conn.execute("DELETE FROM files WHERE path = ?", (event.src_path,))
-            conn.commit(); conn.close()
+            try:
+                conn = get_db()
+                conn.execute("DELETE FROM files WHERE path = ?", (event.src_path,))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
             if self._valid(event.dest_path):
                 self._upsert(event.dest_path)
 
     def _upsert(self, path):
-        cfg     = load_config()
+        cfg     = get_cached_config()                # FIX: cached config
         exc_cfg = cfg.get("extraction", {})
         try:
             st    = os.stat(path)
@@ -423,15 +509,18 @@ class FileChangeHandler(FileSystemEventHandler):
             if model and cfg.get("semantic_search", {}).get("enabled", True):
                 emb       = model.encode(f"{fname} {content or ''}", convert_to_numpy=True).tolist()
                 embedding = json.dumps(emb)
+
+            actual_folder = os.path.dirname(path)    # FIX: actual parent dir
+
             conn = get_db()
             conn.execute("""
                 INSERT OR REPLACE INTO files
                 (name, path, folder, extension, size, modified, indexed_at, content, embedding)
                 VALUES (?,?,?,?,?,?,?,?,?)
-            """, (fname, path, self.root, ext,
+            """, (fname, path, actual_folder, ext,
                   st.st_size, st.st_mtime, time.time(), content, embedding))
             conn.commit(); conn.close()
-            schedule_cache_rebuild(30)   # 30s debounce — won't thrash on bursts
+            schedule_cache_rebuild(30)
         except (PermissionError, OSError):
             pass
 
@@ -465,7 +554,7 @@ def fmt_row(r, tier=1, score=None):
                         if r["modified"] else "—",
         "has_content":  bool(r["content"] if "content" in r.keys() else False),
         "score":        round(score * 100) if score is not None else None,
-        "tier":         tier   # 1=all-kw-filename, 2=partial-kw-filename, 3=content-kw, 4=semantic
+        "tier":         tier
     }
 
 def build_where(extra_conds, extra_params, types, folder, exclude_paths=None):
@@ -479,8 +568,9 @@ def build_where(extra_conds, extra_params, types, folder, exclude_paths=None):
         conds.append("folder = ?")
         params.append(folder)
     if exclude_paths:
-        conds.append(f"path NOT IN ({','.join(['?']*len(exclude_paths))})")
-        params.extend(exclude_paths)
+        ep = list(exclude_paths)
+        conds.append(f"path NOT IN ({','.join(['?']*len(ep))})")
+        params.extend(ep)
     return " AND ".join(conds) if conds else "1=1", params
 
 def tier1_all_keywords_in_filename(terms, types, folder, limit, seen):
@@ -499,7 +589,7 @@ def tier1_all_keywords_in_filename(terms, types, folder, limit, seen):
 def tier2_some_keywords_in_filename(terms, types, folder, limit, seen):
     """At least one (but not all) query terms in filename."""
     if len(terms) == 1:
-        return []   # single term — already covered by tier1
+        return []
     or_conds = " OR ".join([f"LOWER(name) LIKE ?" for _ in terms])
     all_conds = " AND ".join([f"LOWER(name) LIKE ?" for _ in terms])
     conds  = [f"({or_conds})", f"NOT ({all_conds})"]
@@ -529,7 +619,7 @@ def tier3_content_keyword(terms, types, folder, limit, seen):
     return [fmt_row(r, tier=3) for r in rows]
 
 def tier4_semantic(query, types, folder, limit, threshold, seen):
-    """Semantic similarity — only files not already returned by keyword tiers."""
+    """Semantic similarity search. 'seen' is only used to avoid duplicates."""
     if not model_status["loaded"] or _cache_state["building"]:
         return []
     with _emb_lock:
@@ -545,12 +635,12 @@ def tier4_semantic(query, types, folder, limit, threshold, seen):
     except Exception:
         return []
 
-    # Filter by threshold and exclude already-seen paths
-    seen_set = set(seen)
-    above    = [(i, float(sims[i])) for i in range(len(paths))
-                if sims[i] >= threshold and paths[i] not in seen_set]
+    # FIX: don't exclude keyword-matched paths — semantic tab runs independently
+    above = [(i, float(sims[i])) for i in range(len(paths))
+             if sims[i] >= threshold and paths[i] not in seen]
     if not above:
         return []
+
     above.sort(key=lambda x: x[1], reverse=True)
     above = above[:limit]
 
@@ -583,44 +673,42 @@ def tier4_semantic(query, types, folder, limit, threshold, seen):
 
 def hybrid_search(query, types, folder, limit, threshold):
     """
-    4-tier search pipeline. Results are strictly ordered by tier:
-    Tier 1 (all keywords in filename) → Tier 2 (partial filename) →
-    Tier 3 (content keyword) → Tier 4 (semantic only)
+    4-tier search pipeline.
+    Tiers 1-3 (keyword) and Tier 4 (semantic) run INDEPENDENTLY
+    so both tabs in the UI always get populated.
     """
-    terms     = [t for t in query.lower().split() if len(t) > 1]
+    terms = [t for t in query.lower().split() if len(t) > 1]
     if not terms:
         return [], "keyword"
 
     seen    = set()
     results = []
 
-    # Tier 1
+    # ── Keyword tiers (1-3) ──
     t1 = tier1_all_keywords_in_filename(terms, types, folder, limit, seen)
     results.extend(t1)
     seen.update(r["path"] for r in t1)
 
-    # Tier 2 (only if multi-word query)
     remaining = limit - len(results)
     if remaining > 0:
         t2 = tier2_some_keywords_in_filename(terms, types, folder, remaining, seen)
         results.extend(t2)
         seen.update(r["path"] for r in t2)
 
-    # Tier 3
     remaining = limit - len(results)
     if remaining > 0:
         t3 = tier3_content_keyword(terms, types, folder, remaining, seen)
         results.extend(t3)
         seen.update(r["path"] for r in t3)
 
-    # Tier 4 — semantic (uses pharma-expanded query)
-    remaining = limit - len(results)
-    if remaining > 0 and model_status["loaded"] and not _cache_state["building"]:
+    # ── FIX: Tier 4 — semantic runs INDEPENDENTLY with its own limit ──
+    # Not gated behind `remaining > 0`. Uses empty seen set so files
+    # found by keywords can ALSO appear in the Semantic AI tab.
+    if model_status["loaded"] and not _cache_state["building"]:
         expanded_q, _ = expand_pharma_query(query)
-        t4 = tier4_semantic(expanded_q, types, folder, remaining, threshold, seen)
+        t4 = tier4_semantic(expanded_q, types, folder, limit, threshold, set())
         results.extend(t4)
 
-    # Determine mode for UI
     has_semantic = any(r["tier"] == 4 for r in results)
     warming_up   = model_status["loading"] or _cache_state["building"]
     mode = "semantic" if has_semantic else ("warming_up" if warming_up else "keyword")
@@ -655,7 +743,7 @@ def api_index_stop():
     if not indexing_status.get("running"):
         return jsonify({"error": "No indexing in progress"}), 400
     indexing_status["stop_requested"] = True
-    return jsonify({"success": True})
+    return jsonify({"success": True, "message": "Stop signal sent"})
 
 @app.route("/api/index", methods=["POST"])
 def api_index():
@@ -700,7 +788,6 @@ def api_search():
 
     results, mode = hybrid_search(query, types, folder, limit, threshold)
 
-    # Tag each result with UI metadata
     pharma_active = any(r.get("tier") == 4 for r in results)
     for r in results:
         r["search_mode"]     = mode
@@ -716,11 +803,20 @@ def api_folders():
     conn.close()
     return jsonify([{"folder": r["folder"], "count": r["cnt"]} for r in rows])
 
+def _validate_path(path):
+    """FIX: ensure requested path is within an indexed watch folder."""
+    cfg = load_config()
+    watch = cfg.get("watch_folders", [])
+    real = os.path.realpath(path)
+    return any(real.startswith(os.path.realpath(w)) for w in watch)
+
 @app.route("/api/open", methods=["POST"])
 def api_open():
     path = request.json.get("path", "")
     if not os.path.exists(path):
         return jsonify({"error": "File not found"}), 404
+    if not _validate_path(path):                     # FIX: path validation
+        return jsonify({"error": "Path not in indexed folders"}), 403
     try:
         if sys.platform == "win32":    os.startfile(path)
         elif sys.platform == "darwin": subprocess.run(["open", path])
@@ -735,6 +831,8 @@ def api_open_folder():
     folder = os.path.dirname(path)
     if not os.path.exists(folder):
         return jsonify({"error": "Folder not found"}), 404
+    if not _validate_path(path):                     # FIX: path validation
+        return jsonify({"error": "Path not in indexed folders"}), 403
     try:
         if sys.platform == "win32":
             subprocess.Popen(f'explorer /select,"{path}"')
