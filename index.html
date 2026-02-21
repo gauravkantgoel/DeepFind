@@ -156,6 +156,50 @@
   @keyframes spin { to{transform:rotate(360deg)} }
   .spinner { display:inline-block; width:12px; height:12px; border:2px solid var(--border); border-top-color:var(--yellow); border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-left:6px; }
   ::-webkit-scrollbar { width:6px; } ::-webkit-scrollbar-track { background:transparent; } ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+
+  /* ── Loading skeleton ── */
+  @keyframes shimmer {
+    0%   { background-position: -400px 0; }
+    100% { background-position: 400px 0; }
+  }
+  .skeleton-list { display:flex; flex-direction:column; gap:6px; }
+  .skeleton-card {
+    display:flex; align-items:center; gap:14px;
+    background:var(--card); border:1px solid var(--border);
+    border-radius:var(--radius); padding:12px 16px;
+  }
+  .skeleton-icon {
+    width:36px; height:36px; border-radius:6px; flex-shrink:0;
+    background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);
+    background-size: 400px 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+  .skeleton-lines { flex:1; display:flex; flex-direction:column; gap:8px; }
+  .skeleton-line {
+    height:12px; border-radius:4px;
+    background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);
+    background-size: 400px 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+  .skeleton-line.w60  { width:60%; }
+  .skeleton-line.w80  { width:80%; }
+  .skeleton-line.w40  { width:40%; height:10px; }
+  .skeleton-meta {
+    height:14px; width:180px; border-radius:4px; margin:12px 0 10px;
+    background: linear-gradient(90deg, var(--surface) 25%, var(--border) 50%, var(--surface) 75%);
+    background-size: 400px 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+
+  /* ── Semantic overlap info ── */
+  .overlap-info {
+    text-align:center; padding:30px 20px; color:var(--muted);
+    background:var(--card); border:1px solid var(--border);
+    border-radius:var(--radius); margin-top:4px;
+  }
+  .overlap-info .icon { font-size:36px; margin-bottom:10px; }
+  .overlap-info .msg  { font-size:13px; line-height:1.7; }
+  .overlap-info .count { color:var(--green); font-weight:700; }
 </style>
 </head>
 <body>
@@ -217,6 +261,8 @@
         <select class="folder-filter" id="folderFilter" onchange="doSearch()">
           <option value="">All folders</option>
         </select>
+        <div class="filter-sep"></div>
+        <span class="chip active" id="hideCodeChip" onclick="toggleHideCode()" title="Hide code &amp; dev files (.js, .py, .html, .css, .json, etc.)">💻 Hide Code</span>
       </div>
 
       <!-- Result tabs (inside topbar so they sit on the border line) -->
@@ -245,6 +291,16 @@
     <!-- Content: Search -->
     <div class="content" id="panelSearch">
       <div id="resultMeta" class="result-meta"></div>
+      <!-- Loading skeleton -->
+      <div id="loadingState" style="display:none;">
+        <div class="skeleton-meta"></div>
+        <div class="skeleton-list">
+          <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-lines"><div class="skeleton-line w60"></div><div class="skeleton-line w80"></div><div class="skeleton-line w40"></div></div></div>
+          <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-lines"><div class="skeleton-line w80"></div><div class="skeleton-line w60"></div><div class="skeleton-line w40"></div></div></div>
+          <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-lines"><div class="skeleton-line w60"></div><div class="skeleton-line w80"></div><div class="skeleton-line w40"></div></div></div>
+          <div class="skeleton-card"><div class="skeleton-icon"></div><div class="skeleton-lines"><div class="skeleton-line w80"></div><div class="skeleton-line w60"></div><div class="skeleton-line w40"></div></div></div>
+        </div>
+      </div>
       <div id="resultList" class="result-list"></div>
       <div id="emptyState" class="empty" style="display:none;">
         <div class="big">🗂️</div>
@@ -369,9 +425,12 @@ const API       = '/api';
 let searchTimer = null;
 let activeTypes = '';
 let activeTab   = 'keyword';
+let hideCode    = true;          // hide code files by default
 let allResults  = [];
-let lastModelState = null;
-let lastCacheState = null;
+let semanticOverlap = 0;
+let isSearching     = false;
+let lastModelState  = null;
+let lastCacheState  = null;
 
 const FILE_TYPES = [
   {ext:".pdf",label:"PDF",icon:"📄"},{ext:".docx",label:"Word",icon:"📝"},
@@ -386,8 +445,8 @@ window.addEventListener('DOMContentLoaded', () => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(doSearch, 300);
   });
-  document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
-    document.querySelectorAll('.chip').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.chip[data-type]').forEach(c => c.addEventListener('click', () => {
+    document.querySelectorAll('.chip[data-type]').forEach(x => x.classList.remove('active'));
     c.classList.add('active');
     activeTypes = c.dataset.type;
     doSearch();
@@ -412,6 +471,12 @@ function showPanel(p) {
 }
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
+function toggleHideCode() {
+  hideCode = !hideCode;
+  document.getElementById('hideCodeChip').classList.toggle('active', hideCode);
+  doSearch();
+}
+
 function switchTab(tab) {
   activeTab = tab;
   document.getElementById('tabKeyword').classList.toggle('active',  tab === 'keyword');
@@ -426,21 +491,41 @@ async function doSearch() {
 
   if (!q) {
     allResults = [];
-    document.getElementById('resultList').innerHTML   = '';
-    document.getElementById('resultMeta').textContent = '';
-    document.getElementById('resultTabs').style.display   = 'none';
-    document.getElementById('emptyState').style.display   = 'none';
-    document.getElementById('welcomeState').style.display = '';
+    semanticOverlap = 0;
+    document.getElementById('resultList').innerHTML     = '';
+    document.getElementById('resultMeta').textContent   = '';
+    document.getElementById('resultTabs').style.display     = 'none';
+    document.getElementById('emptyState').style.display     = 'none';
+    document.getElementById('loadingState').style.display   = 'none';
+    document.getElementById('welcomeState').style.display   = '';
     return;
   }
   document.getElementById('welcomeState').style.display = 'none';
 
+  // Show skeleton loading state immediately
+  document.getElementById('loadingState').style.display  = '';
+  document.getElementById('resultList').innerHTML        = '';
+  document.getElementById('resultMeta').textContent      = '';
+  document.getElementById('emptyState').style.display    = 'none';
+  isSearching = true;
+
   try {
-    const res  = await fetch(`${API}/search?q=${encodeURIComponent(q)}&types=${encodeURIComponent(activeTypes)}&folder=${encodeURIComponent(folder)}&limit=100`);
-    allResults = await res.json();
+    const res  = await fetch(`${API}/search?q=${encodeURIComponent(q)}&types=${encodeURIComponent(activeTypes)}&folder=${encodeURIComponent(folder)}&hide_code=${hideCode?'1':'0'}&limit=100`);
+    const data = await res.json();
+
+    // Handle response format: {results, semantic_overlap, mode}
+    allResults      = data.results || data;
+    semanticOverlap = data.semantic_overlap || 0;
+
+    // Hide loading skeleton
+    document.getElementById('loadingState').style.display = 'none';
+    isSearching = false;
+
     updateTabs();
     renderCurrentTab();
   } catch {
+    document.getElementById('loadingState').style.display = 'none';
+    isSearching = false;
     showToast('⚠️','Error','Cannot reach backend. Is app.py running?');
   }
 }
@@ -450,22 +535,25 @@ function updateTabs() {
   const sem = allResults.filter(r => r.tier === 4).length;
 
   document.getElementById('kwCount').textContent  = kw;
-  document.getElementById('semCount').textContent = sem;
+  // Show overlap hint in tab count: e.g. "3" or "0 (5✓)" if overlap exists
+  document.getElementById('semCount').textContent = sem > 0
+    ? sem
+    : (semanticOverlap > 0 ? `${semanticOverlap}✓` : '0');
   document.getElementById('resultTabs').style.display = allResults.length ? 'flex' : 'none';
 
-  // Disable tabs with no results
+  // Semantic tab is clickable if it has unique results OR overlap info to show
   const semTab = document.getElementById('tabSemantic');
   const kwTab  = document.getElementById('tabKeyword');
-  semTab.classList.toggle('tab-disabled', sem === 0);
+  const semHasContent = sem > 0 || semanticOverlap > 0;
+  semTab.classList.toggle('tab-disabled', !semHasContent);
   kwTab.classList.toggle('tab-disabled',  kw  === 0);
 
   // FIX: auto-switch to the tab that has results
-  if (activeTab === 'semantic' && sem === 0 && kw > 0) {
+  if (activeTab === 'semantic' && !semHasContent && kw > 0) {
     activeTab = 'keyword';
     kwTab.classList.add('active');
     semTab.classList.remove('active');
-  } else if (activeTab === 'keyword' && kw === 0 && sem > 0) {
-    // Auto-switch to semantic if keyword has nothing
+  } else if (activeTab === 'keyword' && kw === 0 && semHasContent) {
     activeTab = 'semantic';
     semTab.classList.add('active');
     kwTab.classList.remove('active');
@@ -492,14 +580,39 @@ function renderCurrentTab() {
 
   // Tab is empty
   if (!subset.length) {
-    list.innerHTML = ''; meta.textContent = '';
-    empty.style.display = '';
-    const warmingUp = allResults[0]?.search_mode === 'warming_up';
-    document.getElementById('emptyMsg').innerHTML = activeTab === 'semantic'
-      ? (warmingUp
-          ? '⏳ AI model is still loading.<br/>Results will appear here once ready.'
-          : 'No semantic matches found.<br/>Try lowering the similarity threshold in Settings.')
-      : 'No keyword or content matches.<br/>Try the Semantic AI tab for meaning-based results.';
+    meta.textContent = '';
+    empty.style.display = 'none';
+
+    // Semantic tab: show overlap confirmation or no-results message
+    if (activeTab === 'semantic') {
+      const warmingUp = allResults[0]?.search_mode === 'warming_up';
+      if (semanticOverlap > 0) {
+        // AI found the same files as keywords — show helpful confirmation
+        list.innerHTML = `
+          <div class="overlap-info">
+            <div class="icon">🧠✅</div>
+            <div class="msg">
+              AI semantically confirmed <span class="count">${semanticOverlap}</span>
+              of your keyword result${semanticOverlap !== 1 ? 's' : ''}.<br/>
+              No additional files were discovered beyond what keywords already found.<br/>
+              <span style="font-size:11px;color:var(--muted);margin-top:6px;display:inline-block;">
+                This means your keyword search was thorough for this query.
+              </span>
+            </div>
+          </div>`;
+        return;
+      }
+      list.innerHTML = '';
+      empty.style.display = '';
+      document.getElementById('emptyMsg').innerHTML = warmingUp
+        ? '⏳ AI model is still loading.<br/>Results will appear here once ready.'
+        : 'No semantic matches found.<br/>Try lowering the similarity threshold in Settings.';
+    } else {
+      list.innerHTML = '';
+      empty.style.display = '';
+      document.getElementById('emptyMsg').innerHTML =
+        'No keyword or content matches.<br/>Try the Semantic AI tab for meaning-based results.';
+    }
     return;
   }
 
@@ -513,6 +626,9 @@ function renderCurrentTab() {
       metaHtml += ` &nbsp;<span style="font-size:11px;padding:2px 8px;border-radius:99px;background:rgba(244,169,78,.12);color:var(--yellow);border:1px solid rgba(244,169,78,.3);">⏳ AI warming up</span>`;
     else if (allResults[0]?.pharma_expanded)
       metaHtml += ` &nbsp;<span title="Query expanded with pharma synonyms" style="font-size:11px;padding:2px 8px;border-radius:99px;background:rgba(92,110,248,.15);color:var(--accent2);border:1px solid rgba(92,110,248,.3);">💊 pharma expanded</span>`;
+    // Show overlap note alongside unique results
+    if (semanticOverlap > 0)
+      metaHtml += ` &nbsp;<span title="AI also matched files already found by keywords" style="font-size:11px;padding:2px 8px;border-radius:99px;background:rgba(76,175,130,.1);color:var(--green);border:1px solid rgba(76,175,130,.3);">✅ ${semanticOverlap} keyword match${semanticOverlap!==1?'es':''} confirmed</span>`;
   }
   meta.innerHTML = metaHtml;
 
@@ -657,23 +773,39 @@ async function pollStatus() {
 }
 
 // ── Folder nav ────────────────────────────────────────────────────────────────
+
 async function loadFolderNav() {
   try {
     const data = await (await fetch(`${API}/folders`)).json();
+    // data is flat array: [{path, name, count}, ...]
+
+    // Sidebar: show configured watch folders with file counts
+    const sel = document.getElementById('folderFilter');
+    const currentVal = sel.value;
+
     document.getElementById('folderNav').innerHTML = data.slice(0,10).map(f => {
-      const name = f.folder.split(/[\\/]/).pop();
-      return `<div class="nav-item" style="font-size:12px;" title="${esc(f.folder)}" onclick="filterByFolder('${esc(f.folder)}')">
+      const isActive = currentVal === f.path;
+      return `<div class="nav-item${isActive?' active':''}" style="font-size:12px;" title="${esc(f.path)}" onclick="filterByFolder('${esc(f.path)}')">
         <span class="ico">📁</span>
-        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${esc(name)}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${esc(f.name)}</span>
         <span style="font-size:10px;color:var(--muted);">${f.count}</span>
       </div>`;
     }).join('');
-    const sel = document.getElementById('folderFilter');
+
+    // Dropdown: same folders as simple options
     sel.innerHTML = '<option value="">All folders</option>' +
-      data.map(f => `<option value="${esc(f.folder)}">${f.folder.split(/[\\/]/).pop()} (${f.count})</option>`).join('');
+      data.map(f => `<option value="${esc(f.path)}"${f.path===currentVal?' selected':''}>${esc(f.name)} (${f.count})</option>`).join('');
   } catch {}
 }
-function filterByFolder(f) { showPanel('search'); document.getElementById('folderFilter').value = f; doSearch(); }
+
+function filterByFolder(folderPath) {
+  showPanel('search');
+  const sel = document.getElementById('folderFilter');
+  // Toggle: click again to clear
+  sel.value = (sel.value === folderPath) ? '' : folderPath;
+  doSearch();
+  loadFolderNav();  // refresh active state
+}
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 function buildTypeGrid() {
